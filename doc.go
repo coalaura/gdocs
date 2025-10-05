@@ -50,27 +50,14 @@ func handleDoc(w http.ResponseWriter, r *http.Request) {
 
 	page = min(10, max(1, page))
 
-	img, code, err := downloadDocAsPNG(doc, page)
+	err := downloadDocAsPNG(w, doc, page)
 	if err != nil {
-		if code == 0 {
-			w.WriteHeader(http.StatusInternalServerError)
-		} else {
-			w.WriteHeader(code)
-		}
-
-		log.Warnln("doc: failed to download doc")
+		log.Warnln("doc: failed to download document")
 		log.Warnln(err)
-
-		return
 	}
-
-	w.Header().Set("Content-Type", "image/webp")
-	w.WriteHeader(http.StatusOK)
-
-	w.Write(img)
 }
 
-func downloadDocAsPNG(doc string, page int) ([]byte, int, error) {
+func downloadDocAsPNG(w http.ResponseWriter, doc string, page int) error {
 	if _, err := os.Stat("docs"); os.IsNotExist(err) {
 		os.MkdirAll("docs", 0755)
 	}
@@ -80,44 +67,59 @@ func downloadDocAsPNG(doc string, page int) ([]byte, int, error) {
 
 	path := filepath.Join("docs", fmt.Sprintf("%s.%d.webp", doc, page))
 
-	var buf bytes.Buffer
+	var rd io.Reader
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		data, code, err := downloadDocAsPdf(doc)
+		data, err := downloadDocAsPdf(w, doc)
 		if err != nil {
-			return nil, code, err
+			return err
 		}
 
 		pdf, err := fitz.NewFromMemory(data)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return err
 		}
 
 		if pdf.NumPage() < page {
-			return nil, http.StatusBadRequest, fmt.Errorf("page %d does not exist", page)
+			w.WriteHeader(http.StatusBadRequest)
+
+			return fmt.Errorf("page %d does not exist", page)
 		}
 
-		img, err := pdf.ImageDPI(page-1, 300)
+		img, err := pdf.ImageDPI(page-1, 150)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return err
 		}
 
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return err
 		}
 
 		defer file.Close()
 
+		var buf bytes.Buffer
+
 		wr := io.MultiWriter(&buf, file)
 
 		err = webp.Encode(wr, img, webp.Options{
+			Method:  5,
 			Quality: 90,
 		})
 
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return err
 		}
+
+		rd = &buf
 	} else {
 		now := time.Now()
 
@@ -125,21 +127,25 @@ func downloadDocAsPNG(doc string, page int) ([]byte, int, error) {
 
 		file, err := os.OpenFile(path, os.O_RDONLY, 0)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return err
 		}
 
 		defer file.Close()
 
-		_, err = io.Copy(&buf, file)
-		if err != nil {
-			return nil, 0, err
-		}
+		rd = file
 	}
 
-	return buf.Bytes(), 0, nil
+	w.Header().Set("Content-Type", "image/webp")
+	w.WriteHeader(http.StatusOK)
+
+	_, err := io.Copy(w, rd)
+
+	return err
 }
 
-func downloadDocAsPdf(doc string) ([]byte, int, error) {
+func downloadDocAsPdf(w http.ResponseWriter, doc string) ([]byte, error) {
 	if _, err := os.Stat("docs"); os.IsNotExist(err) {
 		os.MkdirAll("docs", 0755)
 	}
@@ -153,18 +159,24 @@ func downloadDocAsPdf(doc string) ([]byte, int, error) {
 
 		resp, err := http.Get(uri)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return nil, err
 		}
 
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, resp.StatusCode, fmt.Errorf("status %d", resp.StatusCode)
+			w.WriteHeader(resp.StatusCode)
+
+			return nil, fmt.Errorf("status %d", resp.StatusCode)
 		}
 
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return nil, err
 		}
 
 		defer file.Close()
@@ -173,7 +185,9 @@ func downloadDocAsPdf(doc string) ([]byte, int, error) {
 
 		_, err = io.Copy(wr, resp.Body)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return nil, err
 		}
 	} else {
 		now := time.Now()
@@ -182,16 +196,20 @@ func downloadDocAsPdf(doc string) ([]byte, int, error) {
 
 		file, err := os.OpenFile(path, os.O_RDONLY, 0)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return nil, err
 		}
 
 		defer file.Close()
 
 		_, err = io.Copy(&buf, file)
 		if err != nil {
-			return nil, 0, err
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return nil, err
 		}
 	}
 
-	return buf.Bytes(), 0, nil
+	return buf.Bytes(), nil
 }
